@@ -1,0 +1,118 @@
+import numpy as np
+import psycopg2
+import random
+
+# Kết nối PostgreSQL
+def connect_db():
+    return psycopg2.connect(
+        dbname="your_db", user="your_user", password="your_password", host="localhost"
+    )
+
+# Tạo bảng lưu đặc trưng
+conn = connect_db()
+cursor = conn.cursor()
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS image_features (
+        id SERIAL PRIMARY KEY,
+        image_path TEXT NOT NULL,
+        label TEXT NOT NULL,
+        feature_vector REAL[],
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+""")
+conn.commit()
+
+# Lưu vector đặc trưng vào PostgreSQL
+def save_feature(image_path, label, feature_vector):
+    conn = connect_db()
+    cursor = conn.cursor()
+    feature_vector_str = "{" + ",".join(map(str, feature_vector)) + "}"
+    cursor.execute("""
+        INSERT INTO image_features (image_path, label, feature_vector) 
+        VALUES (%s, %s, %s)
+    """, (image_path, label, feature_vector_str))
+    conn.commit()
+    conn.close()
+
+# Tải dataset từ PostgreSQL
+def load_dataset():
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT feature_vector, label FROM image_features")
+    dataset = [(np.array(row[0]), row[1]) for row in cursor.fetchall()]
+    conn.close()
+    return dataset
+
+# Khởi tạo quần thể
+num_features = 256  # Giả sử mỗi vector có 256 đặc trưng
+num_individuals = 100
+
+def initialize_population():
+    population = np.random.rand(num_individuals, num_features)
+    population /= population.sum(axis=1, keepdims=True)  # Chuẩn hóa tổng w = 1
+    return population
+
+# Hàm đánh giá độ phù hợp
+def fitness(w, dataset):
+    score = 0
+    for img1, label1 in dataset:
+        for img2, label2 in dataset:
+            if not np.array_equal(img1, img2):
+                d = np.sum(w * np.abs(img1 - img2))
+                score -= d if label1 == label2 else -d
+    return score
+
+# Chọn lọc tự nhiên
+def select_best(population, fitness_scores, num_best=10):
+    indices = np.argsort(fitness_scores)[-num_best:]
+    return population[indices]
+
+# Lai ghép & Đột biến
+def crossover(parent1, parent2):
+    alpha = np.random.rand(len(parent1))
+    child = alpha * parent1 + (1 - alpha) * parent2
+    return child / np.sum(child)
+
+def mutate(child, mutation_rate=0.1):
+    mutation = np.random.randn(len(child)) * mutation_rate
+    child += mutation
+    child = np.clip(child, 0, 1)
+    return child / np.sum(child)
+
+# Chạy Genetic Algorithm
+def genetic_algorithm(num_generations=100):
+    dataset = load_dataset()
+    population = initialize_population()
+    for generation in range(num_generations):
+        fitness_scores = np.array([fitness(w, dataset) for w in population])
+        best_population = select_best(population, fitness_scores)
+        new_population = []
+        for _ in range(len(population) // 2):
+            p1, p2 = random.sample(list(best_population), 2)
+            child = crossover(p1, p2)
+            child = mutate(child)
+            new_population.append(child)
+        population = np.array(new_population)
+        print(f"Generation {generation}: Best fitness = {np.max(fitness_scores)}")
+    return population[np.argmax(fitness_scores)]
+
+# Lưu trọng số tối ưu vào PostgreSQL
+def save_best_weights(best_w):
+    conn = connect_db()
+    cursor = conn.cursor()
+    best_w_str = "{" + ",".join(map(str, best_w)) + "}"
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS optimal_weights (
+            id SERIAL PRIMARY KEY,
+            weights REAL[],
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("INSERT INTO optimal_weights (weights) VALUES (%s)", (best_w_str,))
+    conn.commit()
+    conn.close()
+
+# Chạy tối ưu hóa
+best_w = genetic_algorithm()
+save_best_weights(best_w)
+print("Hoàn thành tối ưu trọng số w và lưu vào PostgreSQL!")
